@@ -38,3 +38,4 @@ out/
 *.orig
 tests/CI/output
 .develvars
+test_iax2_vuln*
