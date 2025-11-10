@@ -53,32 +53,34 @@ def create_iax2_full_header(scallno, dcallno, timestamp, oseqno, iseqno, framety
     Create IAX2 full frame header
 
     struct ast_iax2_full_hdr {
-        unsigned short scallno;   // Source call number (high bit must be 1)
-        unsigned short dcallno;   // Destination call number
-        unsigned int ts;          // 32-bit timestamp
-        unsigned char oseqno;     // Outgoing sequence number
-        unsigned char iseqno;     // Incoming sequence number
-        unsigned char type;       // Frame type
-        unsigned char csub;       // Compressed subclass
+        unsigned short scallno;   // Source call number (high bit must be 1) - 2 bytes
+        unsigned short dcallno;   // Destination call number - 2 bytes
+        unsigned int ts;          // 32-bit timestamp - 4 bytes
+        unsigned char oseqno;     // Outgoing sequence number - 1 byte
+        unsigned char iseqno;     // Incoming sequence number - 1 byte
+        unsigned char type;       // Frame type - 1 byte
+        unsigned char csub;       // Compressed subclass - 1 byte
         unsigned char iedata[0];  // Information elements follow
-    }
+    } __attribute__ ((__packed__));
+    Total: 12 bytes
     """
     # Set high bit on scallno to indicate full frame
     scallno |= IAX_FLAG_FULL
 
     header = struct.pack(
-        '!HHIHBBBB',
-        scallno,    # Source call number (network byte order)
-        dcallno,    # Destination call number
-        timestamp,  # Timestamp
-        oseqno,     # Outgoing sequence
-        iseqno,     # Incoming sequence
-        frametype,  # Frame type
-        subclass,   # Subclass
-        0           # Padding byte
+        '!HHIBBBB',
+        #   ^^^^^^^ FIXED: Was HHIHBBBB (incorrect - had extra H)
+        #   H H I B B B B = 2+2+4+1+1+1+1 = 12 bytes (correct!)
+        scallno,    # H: unsigned short (2 bytes)
+        dcallno,    # H: unsigned short (2 bytes)
+        timestamp,  # I: unsigned int (4 bytes)
+        oseqno,     # B: unsigned char (1 byte) - FIXED from H!
+        iseqno,     # B: unsigned char (1 byte)
+        frametype,  # B: unsigned char (1 byte)
+        subclass,   # B: unsigned char (1 byte)
     )
 
-    return header[:-1]  # Remove padding byte
+    return header  # 12 bytes total
 
 
 def create_ie(ie_type, data):
